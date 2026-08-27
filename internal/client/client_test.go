@@ -58,3 +58,94 @@ func TestClientServesStreamToLocal(t *testing.T) {
 		t.Fatalf("round-trip got=%q err=%v", got, err)
 	}
 }
+
+// connectResult captures connectOnce's return tuple from a background goroutine.
+type connectResult struct {
+	connected bool
+	err       error
+}
+
+func TestConnectOnceReportsConnected(t *testing.T) {
+	t.Run("handshake ok", func(t *testing.T) {
+		cSide, sSide := net.Pipe()
+		c := New(Config{
+			Dialer:   dialerFunc(func(context.Context) (net.Conn, error) { return cSide, nil }),
+			Token:    "t",
+			ClientID: "c1",
+		})
+
+		done := make(chan connectResult, 1)
+		go func() {
+			connected, err := c.connectOnce(context.Background())
+			done <- connectResult{connected, err}
+		}()
+
+		sess, _ := tunnel.ServerSession(sSide)
+		ctrl, _ := sess.AcceptStream()
+		if _, err := proto.ReadHello(ctrl); err != nil {
+			t.Fatalf("ReadHello: %v", err)
+		}
+		proto.WriteAck(ctrl, proto.HelloAck{OK: true})
+
+		// Prove the ack was actually delivered (not just enqueued) before
+		// tearing the session down: open a stream for an unregistered
+		// service. The client only closes it from inside handleStream,
+		// which only runs once connectOnce is past the ack check.
+		st, _ := sess.OpenStream()
+		proto.WriteStreamHeader(st, "unregistered")
+		st.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := st.Read(make([]byte, 1)); err == nil {
+			t.Fatal("expected client to close the stream for an unregistered service")
+		} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			t.Fatalf("timed out waiting for client to close stream (ack not delivered?): %v", err)
+		}
+
+		sess.Close() // now safe: drop the session so connectOnce's accept loop returns
+
+		select {
+		case r := <-done:
+			if !r.connected {
+				t.Fatalf("connected = false, want true (err=%v)", r.err)
+			}
+			if r.err == nil {
+				t.Fatal("err = nil, want non-nil once the session drops")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("connectOnce did not return after session close")
+		}
+	})
+
+	t.Run("handshake rejected", func(t *testing.T) {
+		cSide, sSide := net.Pipe()
+		c := New(Config{
+			Dialer:   dialerFunc(func(context.Context) (net.Conn, error) { return cSide, nil }),
+			Token:    "bad",
+			ClientID: "c1",
+		})
+
+		done := make(chan connectResult, 1)
+		go func() {
+			connected, err := c.connectOnce(context.Background())
+			done <- connectResult{connected, err}
+		}()
+
+		sess, _ := tunnel.ServerSession(sSide)
+		ctrl, _ := sess.AcceptStream()
+		if _, err := proto.ReadHello(ctrl); err != nil {
+			t.Fatalf("ReadHello: %v", err)
+		}
+		proto.WriteAck(ctrl, proto.HelloAck{OK: false, Error: "bad token"})
+
+		select {
+		case r := <-done:
+			if r.connected {
+				t.Fatal("connected = true, want false")
+			}
+			if _, ok := r.err.(*authError); !ok {
+				t.Fatalf("err = %v (%T), want *authError", r.err, r.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("connectOnce did not return after rejected ack")
+		}
+	})
+}

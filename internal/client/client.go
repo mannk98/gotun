@@ -38,8 +38,11 @@ func (c *Client) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		err := c.connectOnce(ctx)
+		connected, err := c.connectOnce(ctx)
 		slog.Warn("tunnel disconnected", "err", err)
+		if connected {
+			backoff = time.Second // a real session established; next retry starts fast
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -51,40 +54,45 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) connectOnce(ctx context.Context) error {
+// connectOnce dials, performs the hello/ack handshake, then serves streams
+// until the session drops. connected reports whether the handshake actually
+// succeeded (Hello acked OK), so Run can tell a real-but-brief session apart
+// from a connection that never came up.
+func (c *Client) connectOnce(ctx context.Context) (connected bool, err error) {
 	conn, err := c.cfg.Dialer.Dial(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	sess, err := tunnel.ClientSession(conn)
 	if err != nil {
 		conn.Close()
-		return err
+		return false, err
 	}
 	defer sess.Close()
 
 	ctrl, err := sess.OpenStream()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := proto.WriteHello(ctrl, proto.Hello{
 		Token: c.cfg.Token, ClientID: c.cfg.ClientID, Services: c.cfg.Services,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	ack, err := proto.ReadAck(ctrl)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ack.OK {
-		return &authError{ack.Error}
+		return false, &authError{ack.Error}
 	}
+	connected = true
 	slog.Info("tunnel up", "endpoints", ack.Endpoints)
 
 	for {
 		st, err := sess.AcceptStream()
 		if err != nil {
-			return err
+			return connected, err
 		}
 		go c.handleStream(st)
 	}
