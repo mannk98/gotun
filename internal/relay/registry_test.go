@@ -13,5 +13,29 @@ func TestRegistryPutReplaces(t *testing.T) {
 	if replaced != c1 {
 		t.Fatalf("second Put must return the prior reg to close")
 	}
-	r.Delete("x")
+	r.Delete("x", c2)
+}
+
+// TestRegistryDeleteIsIdentityAware guards the same-ID rehello race: a stale
+// client's cleanup goroutine calling Delete after it was already replaced by
+// Put must not clobber the newer live entry.
+func TestRegistryDeleteIsIdentityAware(t *testing.T) {
+	r := NewRegistry()
+	a := &ClientReg{ID: "x"}
+	if replaced := r.Put(a); replaced != nil {
+		t.Fatalf("first Put should not replace")
+	}
+	b := &ClientReg{ID: "x"}
+	if replaced := r.Put(b); replaced != a {
+		t.Fatalf("second Put must return the prior reg (a) to close")
+	}
+
+	// Stale cleanup for the replaced client "a" fires with its own identity.
+	r.Delete("x", a)
+
+	// "b" must still be the live entry: Put(c) should report it as replaced.
+	c := &ClientReg{ID: "x"}
+	if replaced := r.Put(c); replaced != b {
+		t.Fatalf("stale Delete(x, a) clobbered live entry; Put(c) replaced=%v want=%v", replaced, b)
+	}
 }

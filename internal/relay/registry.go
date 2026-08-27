@@ -43,8 +43,13 @@ func (r *Registry) Put(c *ClientReg) (replaced *ClientReg) {
 	return replaced
 }
 
-func (r *Registry) Delete(id string) {
+// Delete removes the registry entry for id only if it still holds expect —
+// a compare-and-delete so a stale client's cleanup can never clobber a
+// newer registration that replaced it (same-ID rehello race).
+func (r *Registry) Delete(id string, expect *ClientReg) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.clients, id)
+	if r.clients[id] == expect {
+		delete(r.clients, id)
+	}
 }

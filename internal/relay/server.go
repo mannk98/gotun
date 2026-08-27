@@ -2,9 +2,11 @@ package relay
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/hashicorp/yamux"
 
@@ -23,6 +25,7 @@ type Server struct {
 	cfg  Config
 	ln   tunnel.Listener
 	reg  *Registry
+	mu   sync.Mutex // guards next; concurrent handle() goroutines call listen()
 	next int
 }
 
@@ -52,7 +55,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 	hello, err := proto.ReadHello(ctrl)
-	if err != nil || hello.Token != s.cfg.Token {
+	if err != nil || subtle.ConstantTimeCompare([]byte(hello.Token), []byte(s.cfg.Token)) != 1 {
 		proto.WriteAck(ctrl, proto.HelloAck{OK: false, Error: "unauthorized"})
 		sess.Close()
 		return
@@ -80,13 +83,15 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 	// Block until the session dies, then clean up.
 	<-sess.CloseChan()
-	s.reg.Delete(hello.ClientID)
+	s.reg.Delete(hello.ClientID, client)
 	client.Close()
 	slog.Info("client gone", "id", hello.ClientID)
 }
 
 // listen grabs the next free public port in [PortMin,PortMax].
 func (s *Server) listen() (net.Listener, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for p := s.next; p <= s.cfg.PortMax; p++ {
 		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
 		if err == nil {
