@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
+	"time"
 
 	"github.com/hashicorp/yamux"
 
@@ -22,15 +22,13 @@ type Config struct {
 }
 
 type Server struct {
-	cfg  Config
-	ln   tunnel.Listener
-	reg  *Registry
-	mu   sync.Mutex // guards next; concurrent handle() goroutines call listen()
-	next int
+	cfg Config
+	ln  tunnel.Listener
+	reg *Registry
 }
 
 func NewServer(cfg Config, ln tunnel.Listener) *Server {
-	return &Server{cfg: cfg, ln: ln, reg: NewRegistry(), next: cfg.PortMin}
+	return &Server{cfg: cfg, ln: ln, reg: NewRegistry()}
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -54,12 +52,16 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		sess.Close()
 		return
 	}
+	// ctrl is unauthenticated until the hello checks out: bound the read so a
+	// slow/silent peer can't pin this goroutine forever.
+	ctrl.SetReadDeadline(time.Now().Add(10 * time.Second))
 	hello, err := proto.ReadHello(ctrl)
 	if err != nil || subtle.ConstantTimeCompare([]byte(hello.Token), []byte(s.cfg.Token)) != 1 {
 		proto.WriteAck(ctrl, proto.HelloAck{OK: false, Error: "unauthorized"})
 		sess.Close()
 		return
 	}
+	ctrl.SetReadDeadline(time.Time{}) // authorized: no deadline for the life of the session
 
 	client := &ClientReg{ID: hello.ClientID, Session: sess, Services: map[string]string{}}
 	endpoints := map[string]string{}
@@ -88,14 +90,15 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	slog.Info("client gone", "id", hello.ClientID)
 }
 
-// listen grabs the next free public port in [PortMin,PortMax].
+// listen binds the first free public port in [PortMin,PortMax], scanning from
+// PortMin on every call so a port freed by a torn-down client is reclaimed
+// (a just-closed TCP port re-binds immediately; Go sets SO_REUSEADDR). There's
+// no shared mutable state, so concurrent callers need no lock: a collision on
+// bind just means the loser continues scanning.
 func (s *Server) listen() (net.Listener, int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for p := s.next; p <= s.cfg.PortMax; p++ {
+	for p := s.cfg.PortMin; p <= s.cfg.PortMax; p++ {
 		ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
 		if err == nil {
-			s.next = p + 1
 			return ln, p, nil
 		}
 	}

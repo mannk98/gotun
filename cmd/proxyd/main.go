@@ -46,11 +46,17 @@ func main() {
 		slog.Error("tunnel listen", "err", err)
 		os.Exit(1)
 	}
+	portMin := atoi(os.Getenv("GOTUN_PORT_MIN"), 20000)
+	portMax := atoi(os.Getenv("GOTUN_PORT_MAX"), 20999)
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		slog.Error("invalid port range", "port_min", portMin, "port_max", portMax)
+		os.Exit(1)
+	}
 	srv := relay.NewServer(relay.Config{
 		Token:      token,
 		PublicHost: env("GOTUN_PUBLIC_HOST", "localhost"),
-		PortMin:    atoi(os.Getenv("GOTUN_PORT_MIN"), 20000),
-		PortMax:    atoi(os.Getenv("GOTUN_PORT_MAX"), 20999),
+		PortMin:    portMin,
+		PortMax:    portMax,
 	}, ln)
 	slog.Info("proxyd listening", "listen", env("GOTUN_LISTEN", ":443"))
 	if err := srv.Serve(context.Background()); err != nil {

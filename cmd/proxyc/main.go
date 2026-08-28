@@ -27,9 +27,15 @@ func parseServices(s string) []proto.Service {
 		}
 		name, addr, ok := strings.Cut(pair, "=")
 		if !ok {
+			slog.Warn("malformed GOTUN_SERVICES entry, skipping", "entry", pair)
 			continue
 		}
-		out = append(out, proto.Service{Name: strings.TrimSpace(name), Local: strings.TrimSpace(addr)})
+		name, addr = strings.TrimSpace(name), strings.TrimSpace(addr)
+		if name == "" || addr == "" {
+			slog.Warn("malformed GOTUN_SERVICES entry, skipping", "entry", pair)
+			continue
+		}
+		out = append(out, proto.Service{Name: name, Local: addr})
 	}
 	return out
 }

@@ -99,3 +99,32 @@ func TestServerRelaysToRegisteredService(t *testing.T) {
 		t.Fatalf("round-trip got=%q err=%v", got, err)
 	}
 }
+
+// TestHandleGivesUpWhenHelloNeverArrives guards the pre-auth handshake
+// hardening: a client that opens the control stream but never sends a Hello
+// must not pin handle()'s goroutine forever. The read deadline set around
+// proto.ReadHello should fire and tear the whole tunnel session down.
+func TestHandleGivesUpWhenHelloNeverArrives(t *testing.T) {
+	cSide, sSide := net.Pipe()
+	pl := &pipeListener{ch: make(chan net.Conn, 1)}
+	pl.ch <- sSide
+	srv := NewServer(Config{Token: "t", PublicHost: "127.0.0.1", PortMin: 20200, PortMax: 20300}, pl)
+	go srv.Serve(context.Background())
+
+	sess, err := tunnel.ClientSession(cSide)
+	if err != nil {
+		t.Fatalf("client session: %v", err)
+	}
+	// Open the control stream per protocol, but never write a Hello on it.
+	if _, err := sess.OpenStream(); err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+
+	deadline := time.Now().Add(12 * time.Second)
+	for !sess.IsClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal("server did not give up on a hello-less control stream within 12s (deadline not enforced?)")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

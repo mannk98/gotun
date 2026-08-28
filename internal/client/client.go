@@ -110,7 +110,7 @@ func (c *Client) handleStream(st net.Conn) {
 		st.Close()
 		return
 	}
-	lc, err := net.Dial("tcp", local)
+	lc, err := net.DialTimeout("tcp", local, 10*time.Second)
 	if err != nil {
 		slog.Warn("dial local failed", "service", service, "addr", local, "err", err)
 		st.Close()

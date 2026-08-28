@@ -60,9 +60,6 @@ func NewWSSListener(addr, path string, cfg *tls.Config) (Listener, error) {
 		c.SetReadLimit(-1)
 		nc := websocket.NetConn(context.Background(), c, websocket.MessageBinary)
 		l.conns <- nc
-		// Block so the http handler (and the hijacked conn) stays alive until the
-		// tunnel conn is closed by the relay.
-		<-r.Context().Done()
 	})
 	l.srv = &http.Server{Handler: mux, TLSConfig: cfg}
 	go func() {

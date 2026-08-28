@@ -4,8 +4,13 @@ package proto
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 )
+
+// maxLineLen bounds Hello/Ack/stream-header lines read off an unauthenticated
+// yamux stream, so a slow/silent peer can't grow readLine's buffer without limit.
+const maxLineLen = 64 << 10 // 64 KiB
 
 type Service struct {
 	Name  string `json:"name"`
@@ -36,7 +41,9 @@ func writeJSONLine(w io.Writer, v any) error {
 
 // readLine reads bytes up to and including '\n', returning the content without
 // the '\n'. It reads one byte at a time so it never over-reads into the payload
-// that follows on the same stream.
+// that follows on the same stream. It gives up once the line exceeds
+// maxLineLen, so a slow/silent peer on an unauthenticated stream can't pin
+// the reader or grow buf without bound.
 func readLine(r io.Reader) ([]byte, error) {
 	var buf []byte
 	b := make([]byte, 1)
@@ -45,6 +52,9 @@ func readLine(r io.Reader) ([]byte, error) {
 		if n > 0 {
 			if b[0] == '\n' {
 				return buf, nil
+			}
+			if len(buf) >= maxLineLen {
+				return buf, errors.New("proto: line too long")
 			}
 			buf = append(buf, b[0])
 		}
